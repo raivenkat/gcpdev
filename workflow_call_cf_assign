@@ -1,0 +1,21 @@
+main:
+  params: [input]
+  steps:
+    - get_message:
+        assign:
+            - table_name: "SALES_DATA"
+            - run_date: "2024-08-29"
+            - variable_msg: ${"**Processing For Table" + "|" + table_name + "and run_date is" + "|" + run_date}
+    - get_gcs_raw_path:
+        call: http.post
+        args:
+          url: https://us-central1-dev-de-training.cloudfunctions.net/gdwfilepathextractioncf
+          body:
+            table_name: ${table_name}  # Argument to pass to the Cloud Function
+            run_date: ${run_date}  # Current date in YYYY-MM-DD format
+        result: cloudFunctionResponse
+    - get_gcs_rawpath:
+        assign:
+            - raw_path: ${cloudFunctionResponse.body}
+    - return_value:
+        return: ${raw_path}
