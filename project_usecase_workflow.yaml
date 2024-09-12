@@ -1,0 +1,213 @@
+main:
+  params: [input]
+  steps:
+    - get_message:
+        assign:
+            - table_name: "SALES_DATA"
+            - run_date: "2024-08-29"
+            - variable_msg: ${"**Processing For Table" + "|" + table_name + "and run_date is" + "|" + run_date}
+
+    - get_gcs_raw_path:
+        call: http.post
+        args:
+          url: "https://us-central1-dev-de-training.cloudfunctions.net/gdwfilepathextractioncf"
+          body:
+            table_name: ${table_name}  # Argument to pass to the Cloud Function
+            run_date: ${run_date}  # Current date in YYYY-MM-DD format
+        result: cloudFunctionResponse
+
+    - get_gcs_rawpath:
+        assign:
+            - raw_path: ${cloudFunctionResponse.body}
+            - uuid: ${uuid.generate()}
+    
+    - generate_job_id:
+        assign:
+            - job_id: ${"gdw-pipeline-salesdata-" + uuid}
+    
+    - check_cluster_exist:
+        try:
+            call: http.get
+            args:
+                url: "https://dataproc.googleapis.com/v1/projects/dev-de-training/regions/us-west1/clusters"
+                auth:
+                    type: OAuth2
+                    scopes: "https://www.googleapis.com/auth/cloud-platform"
+                query:
+                    filter: ${"clusterName=" + "job-cluster" }
+            result: cluster_info
+        retry:
+            max_retries: 3
+            interval: 60s
+
+    - handle_cluster_condition:
+        switch:
+            - condition: ${len(cluster_info.body) == 0}
+              next: createCluster
+            - condition: ${len(cluster_info.body) > 0}
+              next: check_cluster_status
+        next: end
+
+    - createCluster:
+        call: http.post
+        args:
+          url: "https://dataproc.googleapis.com/v1/projects/dev-de-training/regions/us-west1/clusters"
+          auth:
+            type: OAuth2
+            scopes: "https://www.googleapis.com/auth/cloud-platform"
+          headers:
+            Content-Type: "application/json"
+          body:
+            projectId: "dev-de-training"
+            clusterName: "job-cluster"
+            config:
+              gceClusterConfig:
+                zoneUri: "us-west1-a"  # Specify the zone
+                serviceAccount: "423929572205-compute@developer.gserviceaccount.com"  # Service Account
+              masterConfig:
+                numInstances: 1
+                machineTypeUri: "e2-standard-2"
+                diskConfig:
+                  bootDiskSizeGb: 50
+              workerConfig:
+                numInstances: 2
+                machineTypeUri: "e2-standard-2"
+                diskConfig:
+                  bootDiskSizeGb: 50
+              softwareConfig:
+                imageVersion: "2.0.47-debian10"  # Dataproc image version
+                optionalComponents:  # Enable Jupyter as an optional component
+                  - JUPYTER
+              configBucket: "dev-de-training-default"  # Specify the GCS bucket
+              endpointConfig:
+                enableHttpPortAccess: true  # Enable Component Gateway
+        result: createClusterResult
+
+    - check_cluster_status:
+        try:
+            call: http.get
+            args:
+                url: "https://dataproc.googleapis.com/v1/projects/dev-de-training/regions/us-west1/clusters/job-cluster"
+                auth:
+                    type: OAuth2
+                    scopes: "https://www.googleapis.com/auth/cloud-platform"
+            result: cluster_status
+        retry:
+            max_retries: 3
+            interval: 60s
+
+    - handle_cluster_status:
+        switch:
+            - condition: ${cluster_status.body.status.state == "RUNNING"}
+              next: submit_job
+            - condition: ${cluster_status.body.status.state == "ERROR"}
+              next: failure_state
+        next: wait_cluster_ready
+
+    - wait_cluster_ready:
+        call: sys.sleep
+        args:
+            seconds: 30
+        next: check_cluster_status
+
+    - submit_job:
+        call: http.post
+        args:
+            url: "https://dataproc.googleapis.com/v1/projects/dev-de-training/regions/us-west1/jobs:submit"
+            auth:
+                type: OAuth2
+                scopes: "https://www.googleapis.com/auth/cloud-platform"
+            headers:
+                Content-Type: "application/json"
+            body:
+                job: {
+                    placement: {
+                        "clusterName": "job-cluster"
+                    },
+                    pysparkJob: {
+                        "mainPythonFileUri": "gs://dev-de-training-default/gdwpipelinecodebase/__main__.py",
+                        "pythonFileUris": ["gs://dev-de-training-default/gdwpipelinecodebase/gdw_data_loader-1.0-py3-none-any.whl"],
+                        "args": ["gs://dev-de-training-default/raw_zone", "SALES_DATA"],
+                        "jarFileUris": ["gs://spark-lib/bigquery/spark-bigquery-with-dependencies_2.12-0.23.2.jar"]  # Specify external JARs here
+                    },
+                    reference: {
+                        "jobId": "${job_id}"
+                    }
+                }
+        result: job_results
+
+    - check_job_status:
+        try:
+            call: http.get
+            args:
+                url: ${"https://dataproc.googleapis.com/v1/projects/dev-de-training/regions/us-west1/jobs/" + job_id}
+                auth:
+                    type: OAuth2
+                    scopes: "https://www.googleapis.com/auth/cloud-platform"
+            result: job_status
+        retry:
+            max_retries: 3
+            interval: 60s
+
+    - handle_job_status:
+        switch:
+            - condition: ${job_status.body.status.state == "PENDING" or job_status.body.status.state == "SETUP_DONE" or job_status.body.status.state == "RUNNING"}
+              next: wait_job_complete
+            - condition: ${job_status.body.status.state == "DONE"}
+              next: success_state
+            - condition: ${job_status.body.status.state == "ERROR"}
+              next: failure_state
+        
+    - success_state:
+        assign:
+            - final_status: "SUCCESS**********************"
+        next: deleteCluster
+
+
+    - failure_state:
+        assign:
+            - final_status: "FAILED**********************"
+        next: deleteCluster
+
+    - wait_job_complete:
+        call: sys.sleep
+        args:
+            seconds: 5
+        next: check_job_status
+
+    - deleteCluster:
+        call: http.delete
+        args:
+          url: "https://dataproc.googleapis.com/v1/projects/dev-de-training/regions/us-west1/clusters/job-cluster"
+          auth:
+            type: OAuth2
+            scopes: "https://www.googleapis.com/auth/cloud-platform"
+        result: deleteClusterResult
+        next: call_bigquery_stored_procedure
+    
+    - call_bigquery_stored_procedure:
+        call: http.post
+        args:
+            url: "https://bigquery.googleapis.com/bigquery/v2/projects/dev-de-training/jobs"
+            auth:
+                type: OAuth2
+                scopes: ["https://www.googleapis.com/auth/bigquery"]
+            headers:
+                Content-Type: "application/json"
+            body: 
+                {
+                "jobReference": {
+                    "projectId": "dev-de-training",
+                    "jobId": "${job_id}"
+                },
+                "configuration": {
+                    "query": {
+                    "query": "CALL `dev-de-training.load_data.update_customer_contact`(2, 'vihan.testoot@gmail.com','982438922');",
+                    "useLegacySql": false
+                    }
+                }
+                }
+        result: bq_job_result
+ 
+    - return_value:
+        return: ${"dataproc Job result status::" + final_status + "::" + "BQ stored proc call result::" + "BQ call completed"}
