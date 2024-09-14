@@ -1,0 +1,84 @@
+Project Usecase
+----------------------------
+
+Retail data analytics - Dmart
+
+----------------------------
+
+products 
+
+sales
+
+stores
+
+* load all the source data into sqlserver tables.
+* add last_modified column in all the tables - deault current_timestamp.
+
+--------------------------
+
+water mark
+---------------------------
+
+table_name, last_loaded_time
+products, 20240913 11 AM
+sales, 20240913 11 AM
+stores, 20240913 11 AM
+
+
+---------------------------------
+* If it is a first load -> ingest all records using selct * and update the last watermark
+* Next incremental run should happen for one hour window 
+-> fetch the max last_modified time and fetch the previous_water_mark_time from watermark table.
+-> form the sql -> select * from products where last_modified >= previous_water_mark_time and last_modified < max_last_modified
+
+Nifi as data ingestion tool
+
+	* Develop data ingestions pipelines for all the tables and load data into GCS in parquet file format.
+	* Run schedule of all the ingestions pipelines are every 1 hour.
+        * GCS incremental load pattern is daily append.
+	* Ingestion Path : => gs://bucket/project/data/raw/{tablename}/{date}/parquet_files
+
+------------------------------------------------------
+
+load_control_table
+-----------------------------------------------------------
+
+table_name , ingestion_time, ingestion_status, processing_status, processing_completion_time
+-------------------------------------------------------------------------------------------
+
+run Schedule every day  6 A M
+
+Develop a pyspark application to process the raw data 
+
+* trigger for pypspark application -> cloud scheduler with workflow trigger
+* run_date = current_day - 1
+* workflow -> assign variable [table1,table2,table3]-> 
+{
+cf -> take table_names list and run_date
+
+return [table1_path, table2_path,table3_path]
+
+dp job -> run_date and paths_list as arguments
+
+-> process data load into bq stage layer with truncate and reload process
+
+
+stage_Product_Performance_Report
+
+stored proc => to append incremental data
+
+insert into target table select * from stage table
+
+
+Product Performance Report - sys_ins_ts - partitioned on day 
+
+cf -> update load control table with status
+
+
+}
+
+
+
+
+	
+	
